@@ -55,6 +55,8 @@ typedef struct _GstEbmlWrite {
   GstFlowReturn last_write_result;
 
   gboolean need_newsegment;
+
+  GstBuffer *streamheader;
 } GstEbmlWrite;
 
 typedef struct _GstEbmlWriteClass {

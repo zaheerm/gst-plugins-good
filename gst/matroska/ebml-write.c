@@ -30,6 +30,7 @@
 #include "ebml-write.h"
 #include "ebml-ids.h"
 
+#include "matroska-mux.h"
 
 GST_DEBUG_CATEGORY_STATIC (gst_ebml_write_debug);
 #define GST_CAT_DEFAULT gst_ebml_write_debug
@@ -63,6 +64,8 @@ gst_ebml_write_init (GstEbmlWrite * ebml, GstEbmlWriteClass * klass)
 
   ebml->cache = NULL;
   ebml->cache_size = 0;
+
+  ebml->streamheader = NULL;
 }
 
 static void
@@ -77,6 +80,10 @@ gst_ebml_write_finalize (GObject * object)
     ebml->cache = NULL;
   }
 
+  if (ebml->streamheader) {
+    gst_buffer_unref (ebml->streamheader);
+    ebml->streamheader = NULL;
+  }
   GST_CALL_PARENT (G_OBJECT_CLASS, finalize, (object));
 }
 
@@ -352,6 +359,7 @@ gst_ebml_write_element_data (GstBuffer * buf, guint8 * write, guint64 length)
 static void
 gst_ebml_write_element_push (GstEbmlWrite * ebml, GstBuffer * buf)
 {
+  GstCaps *bufcaps;
   guint data_size = GST_BUFFER_SIZE (buf) - ebml->handled;
 
   ebml->pos += data_size;
@@ -374,8 +382,46 @@ gst_ebml_write_element_push (GstEbmlWrite * ebml, GstBuffer * buf)
       if (gst_pad_push_event (ebml->srcpad, ev))
         ebml->need_newsegment = FALSE;
     }
+    /* FIXME: as cache is broken, this hack is needed to generate streamheader
+     */
+    {
+      GstMatroskaMux *mux;
+      mux = (GstMatroskaMux *) gst_pad_get_parent_element (ebml->srcpad);
+      if (mux->state == GST_MATROSKA_MUX_STATE_HEADER) {
+        /* streamheader needs appending to */
+        if (ebml->streamheader) {
+          gst_buffer_ref (buf);
+          ebml->streamheader = gst_buffer_merge (ebml->streamheader, buf);
+        } else {
+          ebml->streamheader = gst_buffer_copy (buf);
+        }
+        //GST_WARNING_OBJECT (mux, "appended to streamheader now %d", GST_BUFFER_SIZE(ebml->streamheader));
+
+      }
+      gst_object_unref (mux);
+    }
+    if (GST_PAD_CAPS (ebml->srcpad)) {
+      bufcaps = gst_caps_make_writable (GST_PAD_CAPS (ebml->srcpad));
+    } else {
+      bufcaps = gst_caps_from_string ("video/x-matroska");
+    }
+    {
+      GstStructure *s = gst_caps_get_structure (bufcaps, 0);
+      GValue streamheader = { 0 };
+      GValue bufval = { 0 };
+      g_value_init (&streamheader, GST_TYPE_ARRAY);
+      g_value_init (&bufval, GST_TYPE_BUFFER);
+      gst_value_set_buffer (&bufval, ebml->streamheader);
+      gst_value_array_append_value (&streamheader, &bufval);
+      g_value_unset (&bufval);
+      gst_structure_set_value (s, "streamheader", &streamheader);
+      g_value_unset (&streamheader);
+    }
     buf = gst_buffer_make_metadata_writable (buf);
-    gst_buffer_set_caps (buf, GST_PAD_CAPS (ebml->srcpad));
+    if (!gst_buffer_is_metadata_writable (buf))
+      GST_WARNING ("WTF!!");
+    //GST_WARNING ("setting caps to %s", gst_caps_to_string (bufcaps));
+    gst_buffer_set_caps (buf, bufcaps);
     ebml->last_write_result = gst_pad_push (ebml->srcpad, buf);
   } else {
     if (buf != ebml->cache)
@@ -411,6 +457,23 @@ gst_ebml_write_seek (GstEbmlWrite * ebml, guint64 pos)
     } else {
       GST_LOG ("Seek outside cache range. Clearing...");
       gst_ebml_write_flush_cache (ebml);
+    }
+  }
+
+  /* FIXME: broken because forward seeks don't work....... */
+  if (ebml->streamheader) {
+    GST_WARNING ("seeking inside streamheader to pos %d offset: %d size: %d",
+        pos, GST_BUFFER_OFFSET (ebml->streamheader),
+        GST_BUFFER_SIZE (ebml->streamheader));
+    /* within bounds? */
+    if (pos < GST_BUFFER_SIZE (ebml->streamheader)) {
+      GST_WARNING ("resetting streamheader size due to seek");
+      GST_BUFFER_SIZE (ebml->streamheader) = pos;
+      if (ebml->pos > pos)
+        ebml->handled -= ebml->pos - pos;
+      else
+        ebml->handled += pos - ebml->pos;
+      ebml->pos = pos;
     }
   }
 
