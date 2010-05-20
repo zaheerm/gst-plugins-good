@@ -66,6 +66,7 @@ gst_ebml_write_init (GstEbmlWrite * ebml, GstEbmlWriteClass * klass)
   ebml->cache_size = 0;
 
   ebml->streamheader = NULL;
+  ebml->streamheader_size = 0;
 }
 
 static void
@@ -388,12 +389,40 @@ gst_ebml_write_element_push (GstEbmlWrite * ebml, GstBuffer * buf)
       GstMatroskaMux *mux;
       mux = (GstMatroskaMux *) gst_pad_get_parent_element (ebml->srcpad);
       if (mux->state == GST_MATROSKA_MUX_STATE_HEADER) {
+        GstBuffer *tmp;
         /* streamheader needs appending to */
         if (ebml->streamheader) {
           gst_buffer_ref (buf);
-          ebml->streamheader = gst_buffer_merge (ebml->streamheader, buf);
+          if (ebml->streamheader_size > GST_BUFFER_SIZE (ebml->streamheader)) {
+            gint diff =
+                ebml->streamheader_size - GST_BUFFER_SIZE (ebml->streamheader);
+            gint offset = GST_BUFFER_SIZE (ebml->streamheader);
+            gint size;
+            GstBuffer *sub;
+            gint bufsize = GST_BUFFER_SIZE (buf);
+            offset += bufsize;
+            diff = ebml->streamheader_size - offset;
+            if (diff != 0) {
+              tmp = ebml->streamheader;
+              ebml->streamheader = gst_buffer_copy (tmp);
+              GST_BUFFER_SIZE (tmp) = ebml->streamheader_size;
+              sub = gst_buffer_create_sub (tmp, offset, diff);
+              ebml->streamheader = gst_buffer_merge (ebml->streamheader, buf);
+              size = GST_BUFFER_SIZE (ebml->streamheader);
+              ebml->streamheader = gst_buffer_merge (ebml->streamheader, sub);
+              ebml->streamheader_size = GST_BUFFER_SIZE (ebml->streamheader);
+              GST_BUFFER_SIZE (ebml->streamheader) = size;
+            } else {
+              ebml->streamheader = gst_buffer_merge (ebml->streamheader, buf);
+              ebml->streamheader_size = GST_BUFFER_SIZE (ebml->streamheader);
+            }
+          } else {
+            ebml->streamheader = gst_buffer_merge (ebml->streamheader, buf);
+            ebml->streamheader_size = GST_BUFFER_SIZE (ebml->streamheader);
+          }
         } else {
           ebml->streamheader = gst_buffer_copy (buf);
+          ebml->streamheader_size = GST_BUFFER_SIZE (ebml->streamheader);
         }
         //GST_WARNING_OBJECT (mux, "appended to streamheader now %d", GST_BUFFER_SIZE(ebml->streamheader));
 
@@ -463,16 +492,11 @@ gst_ebml_write_seek (GstEbmlWrite * ebml, guint64 pos)
   /* FIXME: broken because forward seeks don't work....... */
   if (ebml->streamheader) {
     GST_WARNING ("seeking inside streamheader to pos %d offset: %d size: %d",
-        pos, GST_BUFFER_OFFSET (ebml->streamheader),
-        GST_BUFFER_SIZE (ebml->streamheader));
+        pos, GST_BUFFER_OFFSET (ebml->streamheader), ebml->streamheader_size);
     /* within bounds? */
-    if (pos < GST_BUFFER_SIZE (ebml->streamheader)) {
+    if (pos <= ebml->streamheader_size) {
       GST_WARNING ("resetting streamheader size due to seek");
       GST_BUFFER_SIZE (ebml->streamheader) = pos;
-      if (ebml->pos > pos)
-        ebml->handled -= ebml->pos - pos;
-      else
-        ebml->handled += pos - ebml->pos;
       ebml->pos = pos;
     }
   }

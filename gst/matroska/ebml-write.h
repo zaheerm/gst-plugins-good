@@ -57,6 +57,7 @@ typedef struct _GstEbmlWrite {
   gboolean need_newsegment;
 
   GstBuffer *streamheader;
+  guint streamheader_size;
 } GstEbmlWrite;
 
 typedef struct _GstEbmlWriteClass {
