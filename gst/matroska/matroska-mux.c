@@ -2007,13 +2007,13 @@ gst_matroska_mux_start (GstMatroskaMux * mux)
       doctype, mux->doctype_version);
   gst_ebml_write_header (ebml, doctype, mux->doctype_version);
 
+  /* the rest of the header is cached */
+  gst_ebml_write_set_cache (ebml, 0x1000);
+
   /* start a segment */
   mux->segment_pos =
       gst_ebml_write_master_start (ebml, GST_MATROSKA_ID_SEGMENT);
   mux->segment_master = ebml->pos;
-
-  /* the rest of the header is cached */
-  gst_ebml_write_set_cache (ebml, 0x1000);
 
   /* seekhead (table of contents) - we set the positions later */
   mux->seekhead_pos = ebml->pos;
@@ -2526,10 +2526,12 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad)
       gst_ebml_write_master_finish (ebml, mux->cluster);
       mux->prev_cluster_size = ebml->pos - mux->cluster_pos;
       mux->cluster_pos = ebml->pos;
+      gst_ebml_write_set_cache (ebml, 0x20);
       mux->cluster =
           gst_ebml_write_master_start (ebml, GST_MATROSKA_ID_CLUSTER);
       gst_ebml_write_uint (ebml, GST_MATROSKA_ID_CLUSTERTIMECODE,
           GST_BUFFER_TIMESTAMP (buf) / mux->time_scale);
+      gst_ebml_write_flush_cache (ebml);
       mux->cluster_time = GST_BUFFER_TIMESTAMP (buf);
       gst_ebml_write_uint (ebml, GST_MATROSKA_ID_PREVSIZE,
           mux->prev_cluster_size);
@@ -2538,9 +2540,11 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad)
     /* first cluster */
 
     mux->cluster_pos = ebml->pos;
+    gst_ebml_write_set_cache (ebml, 0x20);
     mux->cluster = gst_ebml_write_master_start (ebml, GST_MATROSKA_ID_CLUSTER);
     gst_ebml_write_uint (ebml, GST_MATROSKA_ID_CLUSTERTIMECODE,
         GST_BUFFER_TIMESTAMP (buf) / mux->time_scale);
+    gst_ebml_write_flush_cache (ebml);
     mux->cluster_time = GST_BUFFER_TIMESTAMP (buf);
   }
 
@@ -2613,26 +2617,32 @@ gst_matroska_mux_write_data (GstMatroskaMux * mux, GstMatroskaPad * collect_pad)
     hdr =
         gst_matroska_mux_create_buffer_header (collect_pad->track,
         relative_timestamp, flags);
+    gst_ebml_write_set_cache (ebml, 0x40);
     gst_ebml_write_buffer_header (ebml, GST_MATROSKA_ID_SIMPLEBLOCK,
         GST_BUFFER_SIZE (buf) + GST_BUFFER_SIZE (hdr));
     gst_ebml_write_buffer (ebml, hdr);
+    gst_ebml_write_flush_cache (ebml);
     gst_ebml_write_buffer (ebml, buf);
 
     return gst_ebml_last_write_result (ebml);
   } else {
+    gst_ebml_write_set_cache (ebml, 0x40);
+    /* write and call order slightly unnatural,
+     * but avoids seek and minizes pushing */
     blockgroup = gst_ebml_write_master_start (ebml, GST_MATROSKA_ID_BLOCKGROUP);
     hdr =
         gst_matroska_mux_create_buffer_header (collect_pad->track,
         relative_timestamp, 0);
-    gst_ebml_write_buffer_header (ebml, GST_MATROSKA_ID_BLOCK,
-        GST_BUFFER_SIZE (buf) + GST_BUFFER_SIZE (hdr));
-    gst_ebml_write_buffer (ebml, hdr);
-    gst_ebml_write_buffer (ebml, buf);
     if (write_duration) {
       gst_ebml_write_uint (ebml, GST_MATROSKA_ID_BLOCKDURATION,
           block_duration / mux->time_scale);
     }
-    gst_ebml_write_master_finish (ebml, blockgroup);
+    gst_ebml_write_buffer_header (ebml, GST_MATROSKA_ID_BLOCK,
+        GST_BUFFER_SIZE (buf) + GST_BUFFER_SIZE (hdr));
+    gst_ebml_write_buffer (ebml, hdr);
+    gst_ebml_write_master_finish_full (ebml, blockgroup, GST_BUFFER_SIZE (buf));
+    gst_ebml_write_flush_cache (ebml);
+    gst_ebml_write_buffer (ebml, buf);
     return gst_ebml_last_write_result (ebml);
   }
 }
